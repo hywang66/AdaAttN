@@ -127,7 +127,14 @@ class AdaAttNModel(BaseModel):
 
     def set_input(self, input_dict):
         self.c = input_dict['c'].to(self.device)
-        self.s = input_dict['s'].to(self.device)
+        # self.s = input_dict['s'].to(self.device)
+        s = input_dict['s']
+        if isinstance(s, list):
+            assert isinstance(s[0], torch.Tensor)
+            self.s = [s_i.to(self.device) for s_i in s]
+        else:
+            assert isinstance(s, torch.Tensor)
+            self.s = [s.to(self.device)]
         self.image_paths = input_dict['name']
 
     def encode_with_intermediate(self, input_img):
@@ -149,19 +156,41 @@ class AdaAttNModel(BaseModel):
         else:
             return networks.mean_variance_norm(feats[last_layer_idx])
 
+
+    @staticmethod
+    def get_key_sty(feats_list, last_layer_idx, need_shallow=True):
+        if need_shallow and last_layer_idx > 0:
+            result_img = []
+            for feats in zip(*feats_list): # iterate over all images
+                results = []
+                _, _, h, w = feats[last_layer_idx].shape
+                for i in range(last_layer_idx): # iterate over all layers
+                    results.append(networks.mean_variance_norm(nn.functional.interpolate(feats[i], (h, w))))
+                results.append(networks.mean_variance_norm(feats[last_layer_idx]))
+                result_img.append(torch.cat(results, dim=1))
+            return result_img
+        else:
+            result_img = []
+            for feats in zip(*feats_list):
+                result_img.append(networks.mean_variance_norm(feats[last_layer_idx]))
+            # return networks.mean_variance_norm(feats[last_layer_idx])
+            return result_img
+
     def forward(self):
         self.c_feats = self.encode_with_intermediate(self.c)
-        self.s_feats = self.encode_with_intermediate(self.s)
+        # self.s_feats = self.encode_with_intermediate(self.s)
+        self.s_feats = list(zip(*[self.encode_with_intermediate(s_i) for s_i in self.s])) # transposed, dim: [feat_layer, img, ...]
+
         if self.opt.skip_connection_3:
             c_adain_feat_3 = self.net_adaattn_3(self.c_feats[2], self.s_feats[2], self.get_key(self.c_feats, 2, self.opt.shallow_layer),
-                                                   self.get_key(self.s_feats, 2, self.opt.shallow_layer), self.seed)
+                                                   self.get_key_sty(self.s_feats, 2, self.opt.shallow_layer), self.seed)
         else:
             c_adain_feat_3 = None
         cs = self.net_transformer(self.c_feats[3], self.s_feats[3], self.c_feats[4], self.s_feats[4],
                                   self.get_key(self.c_feats, 3, self.opt.shallow_layer),
-                                  self.get_key(self.s_feats, 3, self.opt.shallow_layer),
+                                  self.get_key_sty(self.s_feats, 3, self.opt.shallow_layer),
                                   self.get_key(self.c_feats, 4, self.opt.shallow_layer),
-                                  self.get_key(self.s_feats, 4, self.opt.shallow_layer), self.seed)
+                                  self.get_key_sty(self.s_feats, 4, self.opt.shallow_layer), self.seed)
         self.cs = self.net_decoder(cs, c_adain_feat_3)
 
     def compute_content_loss(self, stylized_feats):

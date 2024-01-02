@@ -120,20 +120,29 @@ class AdaAttN(nn.Module):
         self.sm = nn.Softmax(dim=-1)
         self.max_sample = max_sample
 
-    def forward(self, content, style, content_key, style_key, seed=None):
+    def forward(self, content, style_list, content_key, style_key_list, seed=None): # modified to take a single content/content_key tensor but a list of style/style_key tensors
         F = self.f(content_key)
-        G = self.g(style_key)
-        H = self.h(style)
-        b, _, h_g, w_g = G.size()
-        G = G.view(b, -1, w_g * h_g).contiguous()
-        if w_g * h_g > self.max_sample:
-            if seed is not None:
-                torch.manual_seed(seed)
-            index = torch.randperm(w_g * h_g).to(content.device)[:self.max_sample]
-            G = G[:, :, index]
-            style_flat = H.view(b, -1, w_g * h_g)[:, :, index].transpose(1, 2).contiguous()
-        else:
-            style_flat = H.view(b, -1, w_g * h_g).transpose(1, 2).contiguous()
+        G = []
+        style_flat = []
+        for style, style_key in zip(style_list, style_key_list):
+            G_i = self.g(style_key)
+            H = self.h(style)
+            b, _, h_g, w_g = G_i.size()
+            G_i = G_i.view(b, -1, w_g * h_g).contiguous()
+            if w_g * h_g > self.max_sample:
+                if seed is not None:
+                    torch.manual_seed(seed)
+                index = torch.randperm(w_g * h_g).to(content.device)[:self.max_sample]
+                G_i = G_i[:, :, index]
+                style_flat_i = H.view(b, -1, w_g * h_g)[:, :, index].transpose(1, 2).contiguous()
+            else:
+                style_flat_i = H.view(b, -1, w_g * h_g).transpose(1, 2).contiguous()
+
+            G.append(G_i)
+            style_flat.append(style_flat_i)
+        G = torch.cat(G, dim=-1)
+        style_flat = torch.cat(style_flat, dim=1)
+
         b, _, h, w = F.size()
         F = F.view(b, -1, w * h).permute(0, 2, 1)
         S = torch.bmm(F, G)
@@ -142,7 +151,7 @@ class AdaAttN(nn.Module):
         # mean: b, n_c, c
         mean = torch.bmm(S, style_flat)
         # std: b, n_c, c
-        std = torch.sqrt(torch.relu(torch.bmm(S, style_flat ** 2) - mean ** 2))
+        std = torch.sqrt(torch.relu(torch.bmm(S, style_flat ** 2) - mean ** 2) + 1e-8) # add +1e-8 to avoid nan
         # mean, std: b, c, h, w
         mean = mean.view(b, h, w, -1).permute(0, 3, 1, 2).contiguous()
         std = std.view(b, h, w, -1).permute(0, 3, 1, 2).contiguous()
